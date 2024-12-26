@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice Bot</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js" 
+            integrity="sha512-q/dWJ3kcmjBLU4Qc47E4A9kTB4m3wuTY7vkFJDTZKjTs8jhyGQnaUrxa0Ytd0ssMZhbNua9hE+E7Qv1j+DyZwA==" 
+            crossorigin="anonymous"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            text-align: center;
+        }
+        #assistant-message {
+            margin-bottom: 20px;
+            font-size: 1.5rem;
+        }
+        #record-button {
+            font-size: 1.2rem;
+            padding: 10px 20px;
+            cursor: pointer;
+        }
+        #record-button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+    <div id="assistant-message">{{ context.message }}</div>
+    <button id="record-button">Push to talk</button>
+
+    <script>
+        var socket = io();
+        var recordButton = document.getElementById("record-button");
+        var assistantMessage = document.getElementById("assistant-message");
+        var mediaRecorder;
+        var audioChunks = [];
+        var audioContext = new (window.AudioContext || window.webkitAudioContext)();
+
+        function setButtonState(state) {
+            if (state === "ready") {
+                recordButton.disabled = false;
+                recordButton.style.backgroundColor = "#4CAF50";
+                recordButton.textContent = "Push to talk";
+            } else if (state === "recording") {
+                recordButton.disabled = false;
+                recordButton.style.backgroundColor = "#FF6347";
+                recordButton.textContent = "Recording... (Push to stop)";
+            } else if (state === "disabled") {
+                recordButton.disabled = true;
+                recordButton.style.backgroundColor = "#cccccc";
+                recordButton.textContent = "Generating response...";
+                assistantMessage.textContent = "...";
+            }
+        }
+
+        function startRecording() {
+            console.log("STARTING RECORDING...");
+            audioChunks = [];
+            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                navigator.mediaDevices.getUserMedia({ audio: true })
+                .then((stream) => {
+                    mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+                    mediaRecorder.ondataavailable = (event) => {
+                        if (event.data.size > 0) {
+                            audioChunks.push(event.data)
+                            // console.log("SENDING: input_audio");
+                            // socket.emit("input_audio", { audio: event.data });
+                        }
+                    };
+                    mediaRecorder.start(1000);
+                })
+                .catch((err) => {
+                    console.error(`getUserMedia: ${err}`);
+                });
+            } else {
+                console.error("getUserMedia not supported on your browser!");
+            }
+        }
+
+        function stopRecording() {
+            if (mediaRecorder) {
+                mediaRecorder.stop();
+                mediaRecorder = null;
+            }
+        }
+
+        setButtonState("ready");
+
+        recordButton.addEventListener("click", function() {
+            if (recordButton.textContent === "Push to talk") {
+                setButtonState("recording");
+                startRecording();
+            } else if (recordButton.textContent.startsWith("Recording")) {
+                stopRecording();
+                setButtonState("disabled");
+                const blob = new Blob(audioChunks);
+                // console.log("SENDING: stop_recording");
+                // socket.emit("stop_recording");
+                console.log("SENDING: input_audio");
+                socket.emit("input_audio", { audio: blob });
+                audioChunks = [];
+            }
+        });
+
+        socket.on("connect_error", () => {
+            console.error("connect_error");
+            assistantMessage.textContent = "Connection lost. Please refresh the page.";
+        });
+        socket.on("disconnect", () => {
+            console.error("disconnect");
+            assistantMessage.textContent = "Disconnected from server.";
+        });
+        // socket.on("stop_recording", function() { # Stopped by VAD
+        //     console.log("RECEIVED: stop_recording");
+        //     stopRecording();
+        //     setButtonState("disabled");
+        // });
+        socket.on("response_audio", async function(data) {
+            const chunk = new Uint8Array(data.audio);
+            console.log(`RECEIVED: response_audio - CHUNK: ${chunk.length}`);
+            audioChunks.push(chunk);
+        });
+        socket.on("response_transcript", function(data) {
+            if (assistantMessage.textContent === "...")
+                assistantMessage.textContent = "";
+            assistantMessage.textContent += data.text;
+        });
+        socket.on("stop_response", function() {
+            console.log("RECEIVED: stop_response");
+            if (audioChunks.length === 0) return;
+            let audioBuffer = new Uint8Array(audioChunks.reduce((acc, val) => acc.concat(Array.from(val)), []));
+            console.log(`FINAL AUDIO: ${audioBuffer.length}`);
+
+            audioContext.decodeAudioData(audioBuffer.buffer, function(buffer) {
+                var source = audioContext.createBufferSource();
+                source.buffer = buffer;
+                source.connect(audioContext.destination);
+                source.start(0);
+            }, function(error) {
+                console.error('Error decoding audio data:', error);
+            });
+
+            audioChunks = [];
+            setButtonState("ready");
+        });
+    </script>
+</body>
+</html>
